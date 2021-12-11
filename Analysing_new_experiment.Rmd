@@ -1,0 +1,189 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This series of notebooks is designed for following the analyses performed in for any new Experiment with structure similar or identical to one of 4 online experiments from [Zajkowski & Zhang, 2021](https://psyarxiv.com/vzqsw/).
+
+The example dataset is the [IIH patients dataset](https://gitlab.pavlovia.org/jiaxiangzhang/cb2_iih).
+
+Raw data is saved in .csv format in *data* folder. We will assume that we already have only a single data file per participant. Since the data is saved multiple times per session to prevent data loss in case of server saving errors, this preprocessing step has to performed prior to this.
+
+We'll start by performing the necessary setup:
+```{r }
+#install analysis package (requires devtools package)
+devtools::install_github('SpTB/cibtools')
+#load necessary libraries:
+library(tidyverse)
+library(cibtools)
+# set the data path
+pathIIH = 'data/'
+# list files
+fi = list.files(path=pathIIH, pattern='.csv', full.names = T)
+#check: should output 47 files
+length(fi)
+```
+We're now ready to load and preprocess the data. This is done using the custom made functions from the `cibtools` package. Let's preprocess and examine the rating data first:
+
+```{r}
+# get ratings
+require(purrr)
+ratings = map2_df(fi, seq_along(fi), getRats, full_only=F)
+#Explore:
+ratings
+```
+The *ratings* dataframe contains all pre and post-task ratings. Rows represents how a given item (picture) was rated by a given participant. Since not all the participants finished the task (or not all data was properly saved), we see that some columns reflecting post-task ratings contain some missing values. 
+
+Let's only analyse the full datasets:
+```{r}
+#exclude partial data
+ratings = ratings %>% na.omit()
+#how many full participants (should be 38):
+length(unique(ratings$subjID))
+
+```
+We can now use the rating dataframe to load and preprocess the main task dataset:
+```{r message=FALSE, warning=FALSE}
+# get main dataset
+main = map2_df(fi, seq_along(fi),   getMain, rats_all = ratings)   
+#exclude partial data
+main = main %>% filter(subjID %in% ratings$subjID)
+
+main
+```
+Here, each row contains a single trial of the main task.
+
+Some of the more important columns that we will be focusing on are:
+ 
+ - subjID: participant identifier
+ - dec_type: domain of choice (val=preference, per=size, no=no choice)
+ - judge_type: domain of judgment (val=preference, per=size)
+ - stimL & stimR: stimuli presented on the left and right side of the screen
+ - chosen: which item was chosen during the choice phase
+ - judgement: the raw scale output during judgement phase [-100 to 100]
+ - ratV_L ,ratV_R: preference value ratings (from the pre-task rating phase) of the left and right stimulus
+   - ratV_L ,ratV_R: size value ratings (from the pre-task rating phase) of the left and right stimulus
+
+All the other metrics and measures analysed from here on can be derived from this set of raw data
+
+## Consistency and Performance Quality
+
+In this section, we do a few sanity checks, to see if the data is up to standard.
+
+### Correlations between objective and perceived size
+The first measure we calculate is the correlation between participant size ratings, and actual item sizes. A lack of significant correlations would suggest that participants did not understand the size rating instructions. We consider one session as a single data-point, averaging across correlations from the three ratings (2 pre and 1 post-task). 
+
+For this, we use the Spearman rank correlation, since we are mostly concerned whether the items were ranked correctly, but an alternative analysis using the Pearson coefficient will give almost identical results (see code chunk). We will be using a custom function *getSizeAcc* which creates a dataframe with necessary stats:
+
+```{r}
+#Size correlations for E1
+method = 'spearman'  # alternatively, try 'pearson' 
+size_corrs1 = getSizeAcc(ratings, method =method) #creates a summary dataframe 
+
+#Mean and SD reported in the paper:
+size_corrs1%>% 
+  summarise(mean_corr = mean(size_est),
+            std_corr = sd(size_est))
+
+
+```
+We can see that the correlations were solid with an average of 0.56, which is ~ .1 lower compared to the original set of studies, but highly significant.
+
+### Correlations between pre and post-task ratings
+
+Next, we will check the pre vs post rating consistencies for each domain. This measure tells us how correlated were participants ratings pre and post task. Lack of correlation could potentially suggest that participants performed at least of them randomly. 
+
+```{r}
+require(skimr)
+getRatPrePostCor(ratings) %>% skim(pref_cor) #preference
+getRatPrePostCor(ratings) %>% skim(size_cor) #size
+```
+As expected, we observe high correlation values for both domains.
+
+### Choice consistency
+
+Choice consistency was defined as the percentage of times the higher-rated item (according to the the pre-task ratings) was also chosen in the main task. We expect that consistency should be considerably larger than change, since they should reflect the same underlying value function.
+
+```{r}
+#run summary function (RC in the function name stands for Rating-Choice)
+sumRCcons(data=main)
+
+```
+
+The output table provides the mean, standard deviation, and t-test results, performed on  participant  means. The t.test p-values (rounded to the 4th decimal) indicate the likelihood of the observed probabilities given random performance (mu=0.5).
+
+### Judgment consistency
+Judgment consistency was defined the percentage of times the the higher rated item was assessed as more valuable in the judgment phase of the main task. For the same reasons as in previous cases, we expect to see high values, indicating internal consistency between ratings and judgments.
+
+
+```{r}
+#run summary function (RJ in the function name stands for Rating-Judgment)
+sumRJcons(data=main, exp=2)
+
+```
+
+## Effects of choices on ratings
+
+If choices have a lasting influence on evaluations, the amount of times an item was chosen should correlate with it's increase in value in the post-choice ratings. To test this intuition, we correlate amount of times an item was chosen in a given choice domain and the change in it's evaluation from before to after the task.
+
+We will use the difference between ratings number 3 and 1 as a measure of change (*post-pre value difference*). To control for a regression to the mean confound \cite{Chen2010,Izuma2013}, we compare these correlations with the correlations between choices and the difference in two pre-task ratings 2 and 1 (*pre-pre value difference*) using a paired t-tests. 
+
+
+```{r}
+
+#create a summary table 
+rat_count = getRatDiffs(main, ratings)
+#explore:
+rat_count
+#
+```
+Each row of this new dataframe represents a single item for a single session. Columns *size_choice_num* and *pref_choice_num* represent how many times during the main task the item was selected. Following are rating difference columns, where *P* stands for preference rating, and *S* for size rating (*e.g.* *P3minP1* is the difference in rating between the third and first preference ratings).
+
+We can then correlate the choice frequency columns with rating difference columns:
+```{r}
+choice_cors = rat_count %>% group_by(subjID2) %>%
+    summarise(ss31 = cor(size_choice_num, S3minS1),
+              ss21 = cor(size_choice_num, S2minS1),
+              pp31 = cor(pref_choice_num, P3minP1),
+              pp21 = cor(pref_choice_num, P2minP1),
+              ps31 = cor(pref_choice_num, S3minS1),
+              ps21 = cor(pref_choice_num, S2minS1),
+              sp31 = cor(size_choice_num, P3minP1),
+              sp21 = cor(size_choice_num, P2minP1)) %>%
+  na.omit()
+  
+choice_cors
+```
+This results in a dataframe where each row represents a single experimental session, and the columns contain correlation values. The first 2 letters of column names represents choice and rating type respectively (*e.g. ss31* is the correlation between the number of size choices and the change in size ratings). The new subject identifier (subjID2) is a concatenation of the experiment and participant numbers separated by a space (*e.g. 2 10* is the 10th participant in E2).
+
+Let's look at the means and standard deviations of these correlations:
+```{r}
+choice_cors %>%
+  pivot_longer(names_to='cor_type', values_to='cor_val',cols = c(ss31, ss21, pp31, pp21, ps31, ps21, sp31, sp21)) %>%
+  group_by(cor_type) %>%
+  summarise(mean_cor = mean(cor_val),
+            sd_cor = sd(cor_val))
+```
+As expected, we can see that post-pre (31) correlations with choices tend to be greater than the control correlations *21* (especially for the the case of preference choice on preference value *pp* case). Finally, let's perform inferential statistics to see which of these differences are significant:
+
+```{r}
+choice_cors %>% 
+  mutate(ss = ss31-ss21, # create difference in correlation columns
+         pp = pp31-pp21,
+         ps = ps31-ps21,
+         sp = sp31-sp21,
+  ) %>% 
+  select(-ss31, -ss21, -pp31, -pp21, -ps31, -ps21, -sp31, -sp21 ) %>% # drop raw corr cols
+  pivot_longer(names_to = 'diff_type', values_to='diff_val',cols = c(ss,pp,ps,sp)) %>%
+  group_by(diff_type) %>%
+  summarise(mean(diff_val), #mean
+            sd(diff_val), #sd
+            t_df = t.test(diff_val, mu=0.0)$parameter, # t-test
+            t_score = t.test(diff_val, mu=0.0)$statistic,
+            p_value = round(t.test(diff_val, mu=0.0)$p.value,4),
+            cohenD = mean(diff_val)/sd(diff_val) # effect size (Cohen's D)
+            )
+
+```
+We observe a significant increase in choice-rating correlations only for the *pp* condition, *i.e.* the influence of preference choices on preference ratings. Even though the original set of studies found 3 of the 4 effects to be significant (except for *ps*), this is not surprising, since that analysis was done on 4 experiments combined (~350 participants) and the small effect sizes observed for *ss* and *sp* conditions indicate that a much larger sample is necessary for replicating them. The *pp* effect however is very strong in all experiments. 
+
